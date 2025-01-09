@@ -1,61 +1,98 @@
-const { rejects } = require('assert');
 const chalk = require('chalk');
 const fs = require('fs');
-const process = require('process');
-const cp = require('node:child_process');
+const cp = require('child_process');
+const path = require('path');
 
-fs.readdir('./Uygulamalar',function(err,data){
-    if(err){
-        return console.log(chalk.red(`[${new Date().toTimeString().split(' ')[0]} Hata]`) + " Uygulamalar klasörü yok lütfen Uygulamalar adında klasör oluşturun.")
-    }
-})
+const reportFile = './performance_report.log';
+fs.writeFileSync(reportFile, '');
 
-var data = fs.readdirSync('./Uygulamalar');
-
-if(data.length == 0){
-    return console.log(chalk.red(`[${new Date().toTimeString().split(' ')[0]} Hata]`) + " Proje bulunamadı.")
+const log = (message, type = 'info') => {
+    const timestamp = `[${new Date().toISOString()}]`;
+    const color = type === 'info' ? chalk.green : type === 'error' ? chalk.red : chalk.yellow;
+    const fullMessage = `${timestamp} ${message}`;
+    console.log(color(fullMessage));
+    fs.appendFileSync(reportFile, `${fullMessage}\n`);
 };
 
-console.log(chalk.yellow(`[${new Date().toTimeString().split(' ')[0]} Client]`) + " Worker Başlatılıyor.")
+const measureTime = async (label, callback) => {
+    const startTime = Date.now();
+    try {
+        await callback();
+        return Date.now() - startTime;
+    } catch (error) {
+        throw error;
+    }
+};
 
-if(process.versions.node < "18.0.2"){
-    console.log(chalk.green(`[${new Date().toTimeString().split(' ')[0]} Bilgi]`) + " Node versiyonunuz güncel değil.")
-    console.log(chalk.green(`[${new Date().toTimeString().split(' ')[0]} Bilgi]`) + " https://nodejs.org/en/ adresinden güncelleyebilirsiniz.")
+const uygulamalarDir = './Uygulamalar';
+if (!fs.existsSync(uygulamalarDir)) {
+    log('Uygulamalar klasörü yok. Lütfen "Uygulamalar" adında klasör oluşturun.', 'error');
+    process.exit(1);
 }
 
-console.log(chalk.green(`[${new Date().toTimeString().split(' ')[0]} Bilgi]`) + ` ${data.length} tane proje bulundu.`);
-new Promise((resolve,rejects) => {
-    data.forEach((item) => {
-        new Promise((resolve, reject) => {
-            fs.readFile('./Uygulamalar/'+item+"/package.json",function(err,data){
-                if(err)return reject();
-                return resolve();
-            });
-        }).then(() => {
-            console.log(chalk.black(`[${new Date().toTimeString().split(' ')[0]} Yüklendi]`) + ` ${item} Projesi yüklendi.`);
-            resolve();
-        }).catch(() => console.log(chalk.red(`[${new Date().toTimeString().split(' ')[0]} Hata]`) + `${item} Projesinde package.json bulunamadı.`))
-    });
-}).then(() => {
-    new Promise((resolve,rejects) => {
-        console.log(chalk.yellow(`[${new Date().toTimeString().split(' ')[0]} Client]`) + " Index dosyaları çalıştırılıyor.");
-        return resolve();
-    }).then(() => {
-        fs.readdir('./Uygulamalar',function(err,data){
-            data.forEach(item => {
-                cp.exec(`cd Uygulamalar/${item} && npm install && npm start`,(error, stdout, stderr) => {
-                    if(stderr == ""){
-                    }else{
-                        return console.log(chalk.red(`[${new Date().toTimeString().split(' ')[0]} Hata]`) + `${item} Projesinde derleyici tarafından hata alındı.`);
-                    }
-                })
-
-                console.log(chalk.yellow(`[${new Date().toTimeString().split(' ')[0]} Client]`) + ` ${item} Projesi çalıştırıldı.`);
-            })
-        })
-    })
-})
-
-process.on('exit',function(){
-    console.log(chalk.blue(`[${new Date().toTimeString().split(' ')[0]} Uyarı]`) + " Sunucu kapatılıyor...");
+const projects = fs.readdirSync(uygulamalarDir).filter((item) => {
+    const itemPath = path.join(uygulamalarDir, item);
+    return fs.statSync(itemPath).isDirectory();
 });
+
+if (projects.length === 0) {
+    log('Proje bulunamadı.', 'error');
+    process.exit(1);
+}
+
+log(`${projects.length} proje bulundu. İşlem başlıyor...`, 'info');
+
+const results = [];
+
+(async () => {
+    const promises = projects.map(async (project) => {
+        const projectPath = path.join(uygulamalarDir, project);
+        log(`Proje işleniyor: ${project}`, 'info');
+
+        let installTime = null;
+        let startTime = null;
+        let status = 'Başarılı';
+
+        try {
+            installTime = await measureTime(`${project} - npm install`, () => {
+                return new Promise((resolve, reject) => {
+                    const install = cp.spawn('npm', ['install'], { cwd: projectPath, stdio: 'inherit' });
+                    install.on('close', (code) => {
+                        code === 0 ? resolve() : reject(new Error(`npm install başarısız.`));
+                    });
+                });
+            });
+
+            startTime = await measureTime(`${project} - npm start`, () => {
+                return new Promise((resolve, reject) => {
+                    const start = cp.spawn('npm', ['start'], { cwd: projectPath, stdio: 'inherit' });
+                    start.on('close', (code) => {
+                        code === 0 ? resolve() : reject(new Error(`npm start başarısız.`));
+                    });
+                });
+            });
+        } catch (error) {
+            status = 'Başarısız';
+            log(`${project} için hata oluştu: ${error.message}`, 'error');
+        }
+
+        results.push({
+            project,
+            installTime: installTime ? `${installTime} ms` : 'N/A',
+            startTime: startTime ? `${startTime} ms` : 'N/A',
+            status,
+        });
+    });
+
+    await Promise.allSettled(promises);
+
+    log('Performans raporu oluşturuluyor...', 'info');
+    results.forEach((result) => {
+        log(
+            `Proje: ${result.project}, Install Süresi: ${result.installTime}, Start Süresi: ${result.startTime}, Durum: ${result.status}`,
+            result.status === 'Başarılı' ? 'info' : 'error'
+        );
+    });
+
+    log('Tüm işlemler tamamlandı.', 'info');
+})();
